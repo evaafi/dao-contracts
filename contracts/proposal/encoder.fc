@@ -1,0 +1,230 @@
+;; This file is licensed under the GNU General Public License.
+;; See the LICENSE.md file in the project root for more information.
+
+#include "../common/constants.fc";
+
+cell proposal::encode_storage(
+    int inited?,            ;; stc 1 bit
+    int proposal_id,        ;; stc 32 bit
+    slice manager_address,  ;; max 267 bit
+    cell holder_code,       ;; 1 ref
+
+    cell proposal_action,       ;; 1 ref
+    slice jetton_wallet_address,;; max 267 bit
+    slice ipfs,                 ;; max 256 bit
+    int send_mode,              ;; 8 bit
+    cell config,                ;; 1 ref
+    int for,                    ;; max 124 bit
+    int against,                ;; max 124 bit
+    int start_time,             ;; max 32 bit
+    int message_pulled          ;; max 1 bit
+) impure inline_ref {
+    builder data = begin_cell()
+        .store_uint(inited?, 1)
+        .store_ref(
+            begin_cell()
+                .store_uint(proposal_id, 32)
+                .store_slice(manager_address)
+                .store_ref(holder_code)
+            .end_cell()
+        )
+        .store_ref(
+            begin_cell()
+                .store_ref(proposal_action)
+                .store_slice(jetton_wallet_address)
+                .store_slice(ipfs)
+                .store_uint(send_mode, 8)
+                .store_ref(config)
+                .store_coins(for)
+                .store_coins(against)
+                .store_uint(start_time, 32)
+                .store_uint(message_pulled, 1)
+            .end_cell()
+        );
+
+    return data.end_cell();
+}
+
+(
+    int,    ;; inited?
+
+    int,    ;; proposal_id
+    slice,  ;; manager_address
+    cell,   ;; holder_code
+
+    cell,   ;; proposal_action
+    slice,  ;; jetton_wallet_address
+    slice,  ;; ipfs
+    int,    ;; send_mode
+    cell,   ;; config
+    int,    ;; for
+    int,    ;; against
+    int,    ;; start_time
+    int     ;; message_pulled
+)   proposal::decode_storage(slice s) impure inline_ref {
+    int inited? = s~load_uint(1);
+
+    slice first_ref = s~load_ref().begin_parse();
+    slice second_ref = s~load_ref().begin_parse();
+
+    (
+        int proposal_id,
+        slice manager_address,
+        cell holder_code
+    ) = (
+        first_ref~load_uint(32),
+        first_ref~load_msg_addr(),
+        first_ref~load_ref()
+    );
+
+    (
+        cell proposal_action,
+        slice jetton_wallet_address,
+        slice ipfs,
+        int send_mode,
+        cell config,
+        int for,
+        int against,
+        int start_time,
+        int message_pulled
+    ) = (
+        second_ref~load_ref(),
+        second_ref~load_msg_addr(),
+        second_ref~load_bits(256),
+        second_ref~load_uint(8),
+        second_ref~load_ref(),
+        second_ref~load_coins(),
+        second_ref~load_coins(),
+        second_ref~load_uint(32),
+        second_ref~load_uint(1)
+    );
+
+    return (
+        inited?,
+
+        proposal_id,
+        manager_address,
+        holder_code,
+
+        proposal_action,
+        jetton_wallet_address,
+        ipfs,
+        send_mode,
+        config,
+        for,
+        against,
+        start_time,
+        message_pulled
+    );
+}
+
+
+cell proposal::encode_init_state(
+    int proposal_id,
+    slice manager_address,
+    cell holder_code
+) inline_ref {
+    builder data = begin_cell()
+        .store_int(0, 1) ;; inited?
+        .store_uint(proposal_id, 32)
+        .store_slice(manager_address)
+        .store_ref(holder_code);
+
+    return data.end_cell();
+}
+
+(
+    int,    ;; inited?
+    int,    ;; proposal_id
+    slice,  ;; manager_address
+    cell    ;; holder_code
+)   proposal::decode_init_state(slice s) inline_ref {
+    (
+        int inited?,
+        int proposal_id,
+        slice manager_address,
+        cell holder_code
+    ) = (
+        s~load_int(1),
+        s~load_uint(32),
+        s~load_msg_addr(),
+        s~load_ref()
+    );
+
+    return (
+        inited?,
+        proposal_id,
+        manager_address,
+        holder_code
+    );
+}
+
+cell proposal::encode_constructor(
+    int query_id, int voting_mode, slice voting_addr, int voting_value,
+    slice ipfs, slice jetton_wallet, int send_mode, cell proposal_action, cell config
+) inline {
+    builder init_voting = begin_cell()
+        .store_uint(voting_mode, 8)
+        .store_slice(voting_addr)
+        .store_coins(voting_value);
+
+    builder data = begin_cell()
+        .store_uint(op::proposal::constructor, 32)
+        .store_uint(query_id, 64)
+        .store_slice(ipfs) ;; 256 bit
+        .store_slice(jetton_wallet) ;; 267 bit
+        .store_uint(send_mode, 8)
+        .store_ref(proposal_action)
+        .store_ref(config)
+        .store_ref(init_voting.end_cell());
+
+    return data.end_cell();
+}
+
+(
+    slice, ;; ipfs
+    slice, ;; jetton_wallet_address
+    int,   ;; send_mode
+    cell,  ;; proposal_action
+    cell,  ;; config
+    int,   ;; voting_mode
+    slice, ;; voting_addr
+    int    ;; voting_value
+)   proposal::decode_constructor(slice s) inline_ref {
+    (
+        slice ipfs,
+        slice jetton_wallet_address,
+        int send_mode,
+        cell proposal_action,
+        cell config
+    ) = (
+        s~load_bits(256),
+        s~load_msg_addr(),
+        s~load_uint(8),
+        s~load_ref(),
+        s~load_ref()
+    );
+
+    slice init_voting = s~load_ref().begin_parse();
+
+    (
+        int voting_mode,
+        slice voting_addr,
+        int voting_value
+    ) = (
+        init_voting~load_uint(8),
+        init_voting~load_msg_addr(),
+        init_voting~load_coins()
+    );
+
+    return (
+        ipfs,
+        jetton_wallet_address,
+        send_mode,
+        proposal_action,
+        config,
+        voting_mode,
+        voting_addr,
+        voting_value
+    );
+}

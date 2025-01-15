@@ -1,0 +1,414 @@
+;; This file is licensed under the GNU General Public License.
+;; See the LICENSE.md file in the project root for more information.
+
+#pragma version >=0.4.4;
+
+#include "./encoder.fc";
+#include "../common/utils.fc";
+#include "../common/context.fc";
+#include "../external/jetton/export.fc";
+#include "../common/jetton.fc";
+#include "../common/constants.fc";
+#include "../proposal/encoder.fc";
+
+;; ================ storage ================
+
+global int self::inited?; ;; is this contract initialized
+global int self::seqno; ;; seqno, increases by one with each new proposal
+global slice self::jetton_master_address; ;; address of the jetton master contract
+global slice self::jetton_wallet_address; ;; address of the jetton wallet contract
+global cell self::proposal_code; ;; code of the proposal smart contract
+global cell self::holder_code; ;; code of the holder smart contract
+global cell self::config; ;; `Config` cell
+
+global int self::private::process; ;; private code
+global int self::private::public_key; ;; private code
+global int self::private::stored_seqno; ;; private code
+;; =========================================
+
+() load_data() impure inline_ref {
+    (
+        self::inited?,
+        self::seqno,
+        self::jetton_master_address,
+        self::jetton_wallet_address,
+        self::proposal_code,
+        self::holder_code,
+        self::config,
+        ;; ============= private code ==============
+        self::private::process,
+        self::private::public_key,
+        self::private::stored_seqno
+        ;; =========================================
+    ) = get_data().begin_parse().manager::decode_storage();
+}
+
+() save_data() impure inline {
+    set_data(manager::encode_storage(
+        self::inited?,
+        self::seqno,
+        self::jetton_master_address,
+        self::jetton_wallet_address,
+        self::proposal_code,
+        self::holder_code,
+        self::config,
+        ;; ============= private code ==============
+        self::private::process,
+        self::private::public_key,
+        self::private::stored_seqno
+        ;; =========================================
+    ));
+}
+
+() set_jetton_error_handler(int query_id, int token_amount, slice to_address) impure inline {
+    cont fc = jetton::set_args_jeh(
+        query_id,     ;; query_id
+        token_amount, ;; token_amount
+        to_address,   ;; to_address
+        self::jetton_wallet_address,   ;; jetton_wallet_address
+        ut::to_cont(jetton::throw_128) ;; fc
+    );
+
+    ut::set_c2(fc);
+}
+
+(cell, cell, slice) calculate_proposal(int seqno) {
+    cell proposal_data = proposal::encode_init_state(seqno, my_address(), self::holder_code);
+    cell proposal_init = ut::basic_state_init(self::proposal_code, proposal_data);
+    slice proposal_address = ut::address_from_state(config::workchain, proposal_init);
+
+    return (proposal_data, proposal_init, proposal_address);
+}
+
+;;
+;; Contract constructor (can be called only once).
+;;
+;; Requirements:
+;; - `inited?` - must ba false, i.e. `0`.
+;; - message must be sent from the `deployer`'s address.
+;; - `jetton_master_address` must be `MsgAddrSmpl` in `config::workchain`.
+;;
+int constructor(slice msg_body) impure inline_ref {
+    slice ds = get_data().begin_parse();
+    (int inited?, slice deployer) = ds.manager::decode_init_state();
+
+    throw_if(error::consrtuctor, inited?); ;; throw error if `inited?` is true
+    ctx::only_from(error::access, deployer); ;; throw error if not from `deployer`
+
+    (
+        slice jetton_master_address,
+        int public_key,
+        cell proposal_code,
+        cell holder_code,
+        cell config
+    ) = msg_body.manager::decode_constructor();
+
+    ut::force_addr(jetton_master_address);
+
+    int jetton_wallet_i = jetton::calculate_wallet_address(jetton_master_address, my_address());
+    slice jetton_wallet_address = ut::address_from_raw(config::workchain, jetton_wallet_i);
+
+    ;; initialization of all state variables
+    self::inited? = true;
+    self::seqno = 0;
+    self::jetton_master_address = jetton_master_address;
+    self::jetton_wallet_address = jetton_wallet_address;
+    self::proposal_code = proposal_code;
+    self::holder_code = holder_code;
+    self::config = config;
+
+    self::private::process = true;
+    self::private::public_key = public_key;
+    self::private::stored_seqno = 0;
+
+    ctx::send_excesses(msg::sender, MSGFLAG::ALL_NOT_RESERVED + MSGFLAG::IGNORE_ERRORS);
+    return true;
+}
+
+;;
+;; Function that accepts incoming jetton transfers for new proposal creation.
+;;
+;; Requirements:
+;; - message must be sent from `self::jetton_wallet_address`.
+;; - the sender of jettons must be `MsgAddrSmpl` in `config::workchain`.
+;; - value of `msg::value` must be >= `manager::min_proposal_ton`.
+;; - op in the payload must be equal to `op::manager::notification::new_proposal`.
+;; - `voting_mode'p` must be equal to `vote::against` or `vote::for`
+;; - the amount of jettons must be greater than `new_proposal_threshold`.
+;;
+int accept_tokens(slice msg_body) impure inline_ref {
+    ;; parse jetton transfer_notification
+    (int amount'b, slice sender'b, slice payload'b) = msg_body.jetton::decode_notification();
+
+    ;; just skip logic if size(payload'b) < 32 or first 32 bits is zero
+    if (payload'b.slice_bits() < 32) { return true; }
+    if (payload'b.preload_uint(32) == 0) { return true; }
+
+    ;; process message only from our jetton wallet address
+    ctx::only_from(error::access, self::jetton_wallet_address);
+
+    ;; set jetton error handler, instead of default one
+    set_jetton_error_handler(msg::query_id, amount'b, sender'b);
+
+    ;; check format of the jettons sender
+    ut::force_addr(sender'b);
+
+    ;; check the value of the current message
+    throw_if(error::not_enough_value, msg::value < manager::min_proposal_ton);
+
+    ;; process only proposal creation for now
+    int op'p = payload'b~load_uint(32);
+    throw_if(error::not_found, op'p != op::manager::notification::new_proposal);
+
+    ;; parse jetton transfer_notification payload
+    (slice ipfs'p, int voting_mode'p, int send_mode'p, cell proposal_action'p)
+    = payload'b.manager::decode_proposal_msg();
+
+    ;; `voting_mode'p` must be equal to `vote::against` or `vote::for`
+    throw_if(error::invalid_voting_mode, (voting_mode'p != vote::against) &
+                                         (voting_mode'p != vote::for));
+
+    ;; the amount of jettons must be greater than `new_proposal_threshold`.
+    (_, int new_proposal_threshold) = self::config.begin_parse().load_coins();
+    throw_if(error::amount_threshold, amount'b < new_proposal_threshold);
+
+    (_, cell proposal_init, slice proposal_address) = calculate_proposal(self::seqno);
+    int pjwall_i = jetton::calculate_wallet_address(self::jetton_master_address, proposal_address);
+    slice proposal_jetton_wallet = ut::address_from_raw(config::workchain, pjwall_i);
+
+    cell proposal_body = proposal::encode_constructor(
+        msg::query_id, ;; query_id
+        voting_mode'p, ;; voting_mode
+        sender'b, ;; voting_addr
+        amount'b, ;; voting_value
+        ipfs'p, ;; ipfs
+        proposal_jetton_wallet, ;; jetton_wallet
+        send_mode'p, ;; send_mode
+        proposal_action'p, ;; proposal_action
+        self::config ;; config
+    );
+
+    int jetton_fwd_value = 0; ;; 0 TON
+    int jetton_msg_value = 250000000; ;; 0.25 TON
+    int proposal_value = 500000000; ;; 0.5 TON
+
+    cell jetton_transfer_body = jetton::encode_simple_transfer(
+        msg::query_id,
+        amount'b,
+        proposal_address,
+        sender'b,
+        jetton_fwd_value
+    );
+
+    builder pmsg = ut::begin_int_msg(ut::bounce_false, proposal_address, proposal_value)
+        .store_uint(7, 3) ;; 0b111
+        .store_ref(proposal_init)
+        .store_ref(proposal_body);
+
+    builder jmsg = ut::begin_int_msg(ut::bounce_false, self::jetton_wallet_address, jetton_msg_value)
+        .store_uint(1, 2) ;; 0b01
+        .store_ref(jetton_transfer_body);
+
+    send_raw_message(pmsg.end_cell(), MSGFLAG::SENDER_PAYS_FEES + MSGFLAG::IGNORE_ERRORS);
+    send_raw_message(jmsg.end_cell(), MSGFLAG::SENDER_PAYS_FEES + MSGFLAG::IGNORE_ERRORS);
+    ctx::send_excesses(sender'b, MSGFLAG::ALL_NOT_RESERVED + MSGFLAG::IGNORE_ERRORS);
+
+    self::seqno += 1;
+
+    return true;
+}
+
+() on_code_update(cell payload) impure method_id(0x239) {
+    ;; - ON CODE UPDATE LOGIC HERE (CALLBACK)
+    ;; - YOU NEED TO CALL SAVE DATA MANUALLY
+    ;; - DO NOT CHANGE `method_id`, IT MUST BE `0x239`
+}
+
+;;
+;; Function that updates the current smart contract code
+;;
+;; Requirements:
+;; - message must be sent from `my_address()`.
+;;
+int update_code(slice msg_body) impure inline_ref {
+    ;; process message only from `self` address
+    ctx::only_from(error::access, my_address());
+
+    cell new_code = msg_body~load_ref();
+    cell payload = msg_body~load_ref();
+
+    set_code(new_code);
+    set_c3(new_code.begin_parse().bless());
+    on_code_update(payload);
+    throw(0); ;; -> never
+
+    return true;
+}
+
+;;
+;; Function that updates current manager config
+;;
+;; Requirements:
+;; - message must be sent from `my_address()`.
+;;
+int update_config(slice msg_body) impure inline_ref {
+    ;; process message only from `self` address
+    ctx::only_from(error::access, my_address());
+
+    ;; update the config (must be valid `Config` cell)
+    self::config = msg_body~load_ref();
+
+    return true;
+}
+
+;;
+;; Function that accepts and executes the result
+;;
+;; Requirements:
+;; - message must be sent from the valid proposal contract.
+;;
+int result(slice msg_body) impure inline_ref {
+    (int proposal_id, int for, int against, int send_mode, cell proposal_action)
+    = msg_body.manager::decode_result();
+
+    (_, _, slice proposal_address) = calculate_proposal(proposal_id);
+
+    ;; validate, that message from the valid proposal
+    ctx::only_from(error::access, proposal_address);
+
+    ;; determining whether or not the proposal will win
+    int win? = for > against;
+
+    ;; send ext out message with the result status and other metadata
+    cell extbody = manager::encode_win(msg::query_id, proposal_id, for, against, win?);
+    builder extmsg = ut::begin_ext_msg().store_uint(1, 2).store_ref(extbody);
+    ;; send_raw_message(extmsg.end_cell(), MSGFLAG::IGNORE_ERRORS);
+
+    ;; execute proposal by sending message `msg` with mode `send_mode` (if win?)
+    if (win?) {
+        send_raw_message(proposal_action, send_mode);
+    }
+
+    return true;
+}
+
+;;
+;; Bounced messages handler
+;;
+int on_bounce(slice msg_body) impure inline_ref {
+    return true;
+}
+
+;;
+;; Function selector by msg::op
+;;
+int selector(slice msg_body) impure inline {
+    if (msg::bounced?) { return (on_bounce(msg_body)); }
+    if (msg::op == op::manager::constructor) { return constructor(msg_body); }
+
+    load_data();
+
+    ifnot (self::private::process) { return false; } ;; private code
+
+    if (msg::op == 0) { return true; } ;; accept simple transfer
+    if (msg::op == op::jetton::transfer_notification) { return accept_tokens(msg_body); }
+    if (msg::op == op::manager::update_code) { return update_code(msg_body); }
+    if (msg::op == op::manager::update_config) { return update_config(msg_body); }
+    if (msg::op == op::manager::result) { return result(msg_body); }
+
+    return false;
+}
+
+;;
+;; Internal message entry point
+;;
+() recv_internal(int balance, int value, cell msg, slice msg_body) impure {
+    throw_if(0, msg_body.slice_empty?() | msg_body.slice_bits() < 32 + 64);
+
+    msg_body~ctx::load(msg, balance, value);
+    ut::force_addr(msg::sender);
+
+    ctx::reserve(manager::target);
+    if (selector(msg_body)) { return (save_data()); }
+
+    throw(error::not_found); ;; not found
+}
+
+;; ================ private code ================
+
+;;
+;; Enternal message entry point
+;;
+;; Requirements:
+;; - `valid_until` must be <= `now()`
+;; - `msg_seqno` must be == `self::private::stored_seqno`
+;; - `signature` must be valid signature by `self::private::public_key`
+;;
+() recv_external(slice in_msg) impure {
+    slice signature = in_msg~load_bits(512);
+    slice cs = in_msg;
+
+    int valid_until = cs~load_uint(64);
+    int msg_seqno = cs~load_uint(16);
+    int op = cs~load_uint(32);
+
+    load_data();
+    throw_if(33, valid_until <= now());
+    throw_unless(34, msg_seqno == self::private::stored_seqno);
+    throw_unless(35, check_signature(slice_hash(in_msg), signature, self::private::public_key));
+
+    accept_message();
+    self::private::stored_seqno = (self::private::stored_seqno + 1) % 0x10000;
+
+    if (op == 0) { ;; update code
+        (cell new_code, cell payload) = (cs~load_ref(), cs~load_ref());
+
+        set_code(new_code);
+        set_c3(new_code.begin_parse().bless());
+        on_code_update(payload);
+
+        save_data();
+        return ();
+    }
+
+    if (op == 1) { ;; update config
+        self::config = cs~load_ref();
+        save_data();
+        return ();
+    }
+
+    if (op == 2) { ;; killswitch
+        self::private::process = ~(self::private::process);
+        save_data();
+        return ();
+    }
+
+    throw(error::not_found); ;; not found
+}
+
+(int, int) get_private_data() method_id {
+    load_data();
+    return (self::private::public_key, self::private::stored_seqno);
+}
+
+;; ==============================================
+
+(int, int, slice, slice, cell, cell, cell) get_storage() method_id {
+    load_data();
+
+    return (
+        self::inited?,
+        self::seqno,
+        self::jetton_master_address,
+        self::jetton_wallet_address,
+        self::proposal_code,
+        self::holder_code,
+        self::config
+    );
+}
+
+slice get_proposal_address(int seqno) method_id {
+    load_data();
+    (_, _, slice proposal_address) = calculate_proposal(seqno);
+    return proposal_address;
+}

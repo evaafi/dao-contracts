@@ -1,0 +1,71 @@
+;; This file is licensed under the GNU General Public License.
+;; See the LICENSE.md file in the project root for more information.
+
+#pragma version >=0.4.4;
+
+forall T -> cont ut::to_cont(T f) asm "NOP"; ;; cast any -> cont
+forall T -> tuple ut::to_tuple(T t) asm "NOP"; ;; cast any -> tuple
+
+slice ut::es() asm "<b b> <s PUSHSLICE"; ;; creates an empty slice
+cell ut::ec() asm "<b b> PUSHREF"; ;; creates an empty cell
+cell ut::stc(slice s) asm "NEWC SWAP STSLICER ENDC"; ;; converts a slice into cell
+slice ut::addr_none() asm "b{00} PUSHSLICE"; ;; creates an addr_none$00 slice
+int ut::is_wc_eq?(int wc, slice addr) asm "REWRITESTDADDR DROP EQUAL";
+int ut::is_addr_none?(slice address) asm "b{00} PUSHSLICE SDEQ";
+() ut::force_addr(slice addr) impure asm "b{10000000000} PUSHSLICE SDPPFXREV 101 THROWIFNOT";
+() ut::set_c2(cont c) impure asm "c2 POP";
+() ut::set_c5(cell action_list) impure asm "c5 POP";
+
+;; int_msg_info$0 ihr_disabled:Bool bounce:Bool bounced:Bool src:MsgAddress
+const int ut::bounce_false = 0x10; ;; b'010000' -> hex -> 0x10
+const int ut::bounce_true  = 0x18; ;; b'011000' -> hex -> 0x10
+
+builder ut::begin_int_msg(int flags, slice addr, int amount) inline {
+    return begin_cell()
+        .store_uint(flags, 6)
+        .store_slice(addr)
+        .store_grams(amount)
+        .store_uint(0, 1 + 4 + 4 + 64 + 32);
+        ;; 1  zeros (ExtraCurrencyCollection)
+        ;; 4  zeros (ihr_fee:Grams)
+        ;; 4  zeros (fwd_fee:Grams)
+        ;; 64 zeros (created_lt:uint64)
+        ;; 32 zeros (created_at:uint32)
+}
+
+;; ext_out_msg_info$11 src:MsgAddressInt dest:MsgAddressExt
+;;   created_lt:uint64 created_at:uint32 = CommonMsgInfo;
+builder ut::begin_ext_msg() inline {
+    return begin_cell().store_slice("30000000000000000000000000"s);
+}
+
+(slice, (slice)) ut::load_either_cs(slice s) inline {
+    slice loaded = s~load_int(1) ? s~load_ref().begin_parse() : s;
+    return (s, (loaded));
+}
+
+cell ut::basic_state_init(cell code, cell data) inline {
+    return begin_cell()
+        .store_uint(6, 5) ;; 0b00110
+        .store_ref(code)
+        .store_ref(data)
+        .end_cell();
+}
+
+slice ut::address_from_raw(int workchain, int addr) inline {
+    builder result = begin_cell()
+        .store_uint(4, 3) ;; addr_std$10 without AnyCast
+        .store_int(workchain, 8) ;; workchain
+        .store_uint(addr, 256);
+
+    return result.end_cell().begin_parse();
+}
+
+slice ut::address_from_state(int workchain, cell state_init) inline {
+    builder addr = begin_cell()
+        .store_uint(4, 3) ;; addr_std$10 without AnyCast
+        .store_int(workchain, 8) ;; workchain
+        .store_uint(cell_hash(state_init), 256);
+
+    return addr.end_cell().begin_parse();
+}

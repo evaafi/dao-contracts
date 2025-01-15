@@ -1,0 +1,49 @@
+;; This file is licensed under the GNU General Public License.
+;; See the LICENSE.md file in the project root for more information.
+
+#include "../common/constants.fc";
+#include "../common/jetton.fc";
+#include "../external/jetton/export.fc";
+#include "./encoder.fc";
+#include "./storage.fc";
+#include "../common/utils.fc";
+#include "../common/context.fc";
+#include "./handlers.fc";
+
+int on_bounce(slice msg_body) impure inline_ref {
+    return true;
+}
+
+int selector(slice msg_body) impure inline {
+    if (msg::bounced?) { return on_bounce(msg_body); }
+
+    load_data();
+    if (msg::op == op::holder::deposit) { return hldr::receive_coins(msg_body); }
+    if (msg::op == op::holder::withdraw) { return hldr::withdraw_coins(msg_body); }
+
+    return true;
+}
+
+() recv_internal(int balance, int value, cell msg, slice msg_body) impure {
+    throw_if(0, msg_body.slice_empty?() | msg_body.slice_bits() < 32 + 64);
+
+    msg_body~ctx::load(msg, balance, value);
+    ut::force_addr(msg::sender);
+    ctx::reserve(holder::target);
+
+    if (selector(msg_body)) { return (save_data());}
+
+    throw(error::not_found);
+}
+
+(slice, slice, int, int, int) get_storage() method_id {
+    load_data();
+
+    return (
+        self::proposal_address,
+        self::voter_address,
+        self::amount,
+        self::end_time,
+        self::withdrawed
+    );
+}

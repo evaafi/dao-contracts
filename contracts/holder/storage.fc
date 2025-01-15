@@ -1,0 +1,28 @@
+;; This file is licensed under the GNU General Public License.
+;; See the LICENSE.md file in the project root for more information.
+
+global slice self::proposal_address;
+global slice self::voter_address;
+global int self::amount;
+global int self::end_time;
+global int self::withdrawed;
+
+() load_data() impure inline_ref {
+    (
+        self::proposal_address,
+        self::voter_address,
+        self::amount,
+        self::end_time,
+        self::withdrawed
+    ) = get_data().begin_parse().holder::decode_storage();
+}
+
+() save_data() impure inline_ref {
+    set_data(holder::encode_storage(
+        self::proposal_address,
+        self::voter_address,
+        self::amount,
+        self::end_time,
+        self::withdrawed
+    ));
+}

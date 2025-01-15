@@ -1,0 +1,221 @@
+;; This file is licensed under the GNU General Public License.
+;; See the LICENSE.md file in the project root for more information.
+
+#include "../manager/encoder.fc";
+
+() set_jetton_error_handler(int query_id, int token_amount, slice to_address) impure inline {
+    cont fc = jetton::set_args_jeh(
+        query_id,     ;; query_id
+        token_amount, ;; token_amount
+        to_address,   ;; to_address
+        self::jetton_wallet_address,   ;; jetton_wallet_address
+        ut::to_cont(jetton::throw_128) ;; fc
+    );
+
+    ut::set_c2(fc);
+}
+
+int prpsl::deploy_holder(slice sender_address, int amount) impure inline_ref {
+    (
+        int new_proposal_threshold,
+        int min_proposal_execution,
+        int pending_duration,
+        int voting_duration,
+        int queue_duration,
+        int execution_duration,
+        _ ;; dict - voting_power (maybe null)
+    ) = manager::decode_config(self::config);
+
+    cell holder_data = holder::encode_storage(my_address(), sender_address, 0,
+        self::start_time + pending_duration + voting_duration + 1, 0);
+
+    cell holder_state_init = ut::basic_state_init(self::holder_code, holder_data);
+    slice holder_address = ut::address_from_state(config::workchain, holder_state_init);
+
+    builder body = begin_cell()
+        .store_uint(op::holder::deposit, 32)
+        .store_uint(msg::query_id, 64)
+        .store_slice(sender_address)
+        .store_coins(amount);
+
+    builder hmsg = ut::begin_int_msg(ut::bounce_false, holder_address, 0)
+        .store_uint(7, 3) ;; 0b111
+        .store_ref(holder_state_init)
+        .store_ref(body.end_cell());
+
+    send_raw_message(hmsg.end_cell(), MSGFLAG::IGNORE_ERRORS + MSGFLAG::ALL_NOT_RESERVED);
+    return true;
+}
+
+int prpsl::constructor(slice in_msg_body) impure inline_ref {
+    (
+        self::inited?,
+        self::proposal_id,
+        self::manager_address,
+        self::holder_code
+    ) = get_data().begin_parse().proposal::decode_init_state();
+
+    throw_if(error::consrtuctor, self::inited? == 1);
+    ctx::only_from(error::access, self::manager_address);
+
+    (
+        self::ipfs,
+        self::jetton_wallet_address,
+        self::send_mode,
+        self::proposal_action,
+        self::config,
+        int voting_mode,
+        slice voting_addr,
+        int voting_value
+    ) = in_msg_body.proposal::decode_constructor();
+
+    self::for = 0;
+    self::against = 0;
+    self::inited? = 1;
+    self::message_pulled = 0;
+    self::start_time = now();
+
+    if (voting_mode == vote::against) {
+        self::against += voting_value;
+    } elseif (voting_mode == vote::for) {
+        self::for += voting_value;
+    }
+
+    return prpsl::deploy_holder(voting_addr, voting_value);
+}
+
+int vote_with_power(slice sender, int amount, cell pd) {
+    if (cell_null?(pd)) { return amount; }
+
+    (_, int sender_i) = parse_std_addr(sender);
+    (slice power_cs, int ok?) = pd.udict_get?(256, sender_i);
+    ifnot (ok?) { return amount; }
+
+    int power = power_cs.preload_uint(32);
+    int power' = max(min(power, 300), 100); ;; min=100, max=300
+
+    return (amount * power') / 100;
+}
+
+int prpsl::process_vote(slice in_msg_body) impure inline_ref {
+    throw_if(error::consrtuctor, self::inited? == 0);
+    ctx::only_from(error::access, self::jetton_wallet_address);
+
+    (
+        int new_proposal_threshold,
+        int min_proposal_execution,
+        int pending_duration,
+        int voting_duration,
+        int queue_duration,
+        int execution_duration,
+        cell voting_power
+    ) = manager::decode_config(self::config);
+
+
+    (
+        int jetton_amount,
+        slice jetton_sender,
+        slice jetton_fwd_paylod
+    ) = in_msg_body.jetton::decode_notification();
+
+    set_jetton_error_handler(msg::query_id, jetton_amount, jetton_sender);
+
+    ifnot (now() > (self::start_time + pending_duration)) &
+          (now() <= (self::start_time + pending_duration + voting_duration))
+    {
+        throw(error::invalid_time);
+    }
+
+
+    int vote = jetton_fwd_paylod~load_uint(8);
+    jetton_fwd_paylod.end_parse();
+
+    if (vote == vote::against) {
+        self::against += vote_with_power(jetton_sender, jetton_amount, voting_power);
+    } elseif (vote == vote::for) {
+        self::for += vote_with_power(jetton_sender, jetton_amount, voting_power);
+    } else {
+        throw(error::invalid_voting_mode);
+    }
+
+    return prpsl::deploy_holder(jetton_sender, jetton_amount);
+}
+
+int prpsl::send_result() impure inline_ref {
+    throw_if(error::access, self::message_pulled == 1);
+    throw_if(error::access, msg::value < 1000000000);
+
+    (
+        int new_proposal_threshold,
+        int min_proposal_execution,
+        int pending_duration,
+        int voting_duration,
+        int queue_duration,
+        int execution_duration,
+        _ ;; dict - voting_power (maybe null)
+    ) = manager::decode_config(self::config);
+
+    if ~ (now() >= self::start_time + pending_duration + voting_duration + queue_duration + execution_duration) {
+        throw(error::invalid_time);
+    }
+
+    builder manager_result_body = begin_cell()
+        .store_uint(op::manager::result, 32) ;; stc 32 bit
+        .store_uint(msg::query_id, 64) ;; stc 64 bit
+        .store_uint(self::proposal_id, 32) ;; stc 32 bit
+        .store_coins(self::for) ;; max 124 bit
+        .store_coins(self::against) ;; max 124 bit
+        .store_uint(self::send_mode, 8)
+        .store_ref(self::proposal_action); ;; 1 ref
+
+    builder mmsg = ut::begin_int_msg(ut::bounce_false, self::manager_address, 0)
+        .store_uint(1, 2) ;; 0b01
+        .store_ref(manager_result_body.end_cell());
+
+    send_raw_message(mmsg.end_cell(), MSGFLAG::ALL_NOT_RESERVED + MSGFLAG::IGNORE_ERRORS);
+    return true;
+}
+
+int prpsl::process_withdraw(slice in_msg_body) impure inline_ref {
+     (
+        int new_proposal_threshold,
+        int min_proposal_execution,
+        int pending_duration,
+        int voting_duration,
+        int queue_duration,
+        int execution_duration,
+        _ ;; dict - voting_power (maybe null)
+    ) = manager::decode_config(self::config);
+
+    if ~ (now() >= self::start_time + pending_duration + voting_duration) {
+        throw(error::invalid_time);
+    }
+
+    (slice voter_address, int amount) = (in_msg_body~load_msg_addr(), in_msg_body~load_coins());
+
+    cell holder_storage = holder::encode_storage(my_address(), voter_address, 0,
+        self::start_time + pending_duration + voting_duration + 1, 0);
+
+    cell holder_state_init = ut::basic_state_init(self::holder_code, holder_storage);
+    slice holder_address = ut::address_from_state(config::workchain, holder_state_init);
+
+    ctx::only_from(error::access, holder_address);
+
+    int jetton_fwd_value = 0; ;; 0 TON
+    int jetton_msg_value = 250000000; ;; 0.25 TON
+
+    cell jetton_transfer_body = jetton::encode_simple_transfer(
+        msg::query_id,
+        amount,
+        voter_address,
+        voter_address,
+        jetton_fwd_value
+    );
+
+    builder jmsg = ut::begin_int_msg(ut::bounce_false, self::jetton_wallet_address, jetton_msg_value)
+        .store_uint(1, 2) ;; 0b01
+        .store_ref(jetton_transfer_body);
+
+    send_raw_message(jmsg.end_cell(), MSGFLAG::BOUNCE_IF_ERROR);
+    return true;
+}

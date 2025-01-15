@@ -1,0 +1,41 @@
+;; This file is licensed under the GNU General Public License.
+;; See the LICENSE.md file in the project root for more information.
+
+const int config::workchain = 0;
+
+const int manager::target  = 350000000; ;; 0.35 ton
+const int proposal::target = 300000000; ;; 0.30 ton
+const int holder::target   = 100000000; ;; 0.1 ton
+
+const int manager::min_proposal_ton = 1000000000; ;; 1 TON
+
+const int error::not_found = 0xffff;
+const int error::address_format = 101;
+const int error::consrtuctor = 102;
+const int error::access = 103;
+const int error::invalid_time = 104;
+const int error::invalid_voting_mode = 105;
+const int error::amount_threshold = 106;
+const int error::not_enough_value = 107;
+const int error::not_enough_token = 108;
+
+const int op::jetton::transfer_notification = 0x7362d09c; ;; TEP74
+
+const int op::proposal::constructor = "op::proposal::constructor"c;
+const int op::proposal::withdraw = "op::proposal::withdraw"c;
+const int op::proposal::vote = "op::proposal::vote"c;
+const int op::proposal::finish = "op::proposal::finish"c;
+
+const int op::holder::withdraw = "op::holder::withdraw"c;
+const int op::holder::deposit = "op::holder::deposit"c;
+
+const int op::manager::notification::new_proposal = "op::manager::notification::new_proposal"c;
+const int op::manager::constructor = "op::manager::constructor"c;
+const int op::manager::update_code = "op::manager::update_code"c;
+const int op::manager::update_config = "op::manager::update_config"c;
+const int op::manager::result = "op::manager:result"c;
+
+const int op::event::result = "op::event::result"c;
+
+const int vote::for = 1;
+const int vote::against = 0;

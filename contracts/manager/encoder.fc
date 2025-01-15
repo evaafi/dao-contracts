@@ -1,0 +1,146 @@
+;; This file is licensed under the GNU General Public License.
+;; See the LICENSE.md file in the project root for more information.
+
+#pragma version >=0.4.4;
+
+#include "../common/utils.fc";
+#include "../common/constants.fc";
+
+cell manager::encode_storage(int inited?, int seqno, slice jetton_master_address,
+                             slice jetton_wallet_address, cell proposal_code,
+                             cell holder_code, cell config,
+       {- private code => -} int process, int public_key, int stored_seqno {- <= -}) inline {
+    builder data = begin_cell()
+        .store_int(inited?, 1)              ;; + stc 1   bit
+        .store_uint(seqno, 32)              ;; + stc 32  bit
+        .store_slice(jetton_master_address) ;; + max 267 bit
+        .store_slice(jetton_wallet_address) ;; + max 267 bit
+        .store_ref(proposal_code)           ;; + stc 1   ref
+        .store_ref(holder_code)             ;; + stc 1   ref
+        .store_ref(config);                 ;; + stc 1   ref
+
+    ;; ============= private code ==============
+    data = data.store_int(process, 1);        ;; + stc 1 bit
+    data = data.store_uint(public_key, 256);  ;; + stc 256 bit
+    data = data.store_uint(stored_seqno, 16); ;; + src 16  bit
+    ;; =========================================
+
+    return data.end_cell();
+}
+
+(int, int, slice, slice, cell, cell, cell,
+{- private code => -} int, int, int {- <= -}) manager::decode_storage(slice s) inline {
+    int inited? = s~load_int(1);
+    int seqno = s~load_uint(32);
+    slice jetton_master_address = s~load_msg_addr();
+    slice jetton_wallet_address = s~load_msg_addr();
+    cell proposal_code = s~load_ref();
+    cell holder_code = s~load_ref();
+    cell config = s~load_ref();
+
+    ;; ============= private code ==============
+    int process = s~load_int(1);
+    int public_key = s~load_uint(256);
+    int stored_seqno = s~load_uint(16);
+    ;; =========================================
+
+    s.end_parse();
+
+    return (inited?, seqno, jetton_master_address,
+            jetton_wallet_address, proposal_code, holder_code, config,
+            {- private code => -} process, public_key, stored_seqno {- <= -});
+}
+
+(int, slice) manager::decode_init_state(slice s) inline {
+    int inited? = s~load_int(1);
+    slice deployer = s~load_msg_addr();
+    s~skip_bits(256); ;; salt
+
+    s.end_parse();
+
+    return (inited?, deployer);
+}
+
+(slice, int, cell, cell, cell) manager::decode_constructor(slice s) inline {
+    slice jetton_master_address = s~load_msg_addr();
+    int public_key = s~load_uint(256);
+    cell proposal_code = s~load_ref();
+    cell holder_code = s~load_ref();
+    cell config = s~load_ref();
+
+    s.end_parse();
+
+    return (jetton_master_address, public_key, proposal_code, holder_code, config);
+}
+
+(slice, int, int, cell) manager::decode_proposal_msg(slice s) inline {
+    slice ipfs = s~load_bits(256);
+    int voting_mode = s~load_uint(8);
+    int send_mode = s~load_uint(8);
+    cell proposal_action = s~load_ref();
+
+    s.end_parse();
+
+    return (ipfs, voting_mode, send_mode, proposal_action);
+}
+
+(int, int, int, int, cell) manager::decode_result(slice s) inline {
+    int proposal_id = s~load_uint(32);
+    int for = s~load_coins();
+    int against = s~load_coins();
+    int send_mode = s~load_uint(8);
+    cell proposal_action = s~load_ref();
+
+    s.end_parse();
+
+    return (proposal_id, for, against, send_mode, proposal_action);
+}
+
+;;
+;; status_config#_ pending_duration:uint32
+;;                 voting_duration:uint32
+;;                 queued_duration:uint32
+;;                 execution_duration:uint32 = StatusConfig;
+;;
+;; config#_ new_proposal_threshold:Coins
+;;          min_proposal_execution:Coins
+;;          status_config:^StatusConfig
+;;          voting_power:(HashmapE 256 uint32) = Config;
+;;
+
+(
+    int, ;; new_proposal_threshold
+    int, ;; min_proposal_execution
+    int, ;; pending_duration
+    int, ;; voting_duration
+    int, ;; queue_duration
+    int, ;; execution_duration
+    cell ;; voting_power (maybe null)
+) manager::decode_config(cell config) inline {
+    slice config_slice = config.begin_parse();
+
+    int new_proposal_threshold = config_slice~load_coins();
+    int min_proposal_execution = config_slice~load_coins();
+    slice status_config = config_slice~load_ref().begin_parse();
+    cell voting_power = config_slice~load_dict();
+
+    int pending_duration = status_config~load_uint(32);
+    int voting_duration = status_config~load_uint(32);
+    int queue_duration = status_config~load_uint(32);
+    int execution_duration = status_config~load_uint(32);
+
+    return (new_proposal_threshold, min_proposal_execution, pending_duration,
+            voting_duration, queue_duration, execution_duration, voting_power);
+}
+
+cell manager::encode_win(int query_id, int proposal_id, int for, int against, int status) inline {
+    builder data = begin_cell()
+        .store_uint(op::event::result, 32)
+        .store_uint(query_id, 64)
+        .store_uint(proposal_id, 32)
+        .store_coins(for)
+        .store_coins(against)
+        .store_int(status, 1);
+
+    return data.end_cell();
+}

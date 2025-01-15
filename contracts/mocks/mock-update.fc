@@ -1,0 +1,15 @@
+;; This file is licensed under the GNU General Public License.
+;; See the LICENSE.md file in the project root for more information.
+
+#pragma version >=0.4.4;
+
+() on_code_update(cell payload) impure method_id(0x239) {
+    builder data = begin_cell().store_uint(239, 32);
+    set_data(data.end_cell());
+}
+
+() recv_internal(int balance, int value, cell msg, slice msg_body) impure { }
+
+int get_test_data() method_id {
+    return get_data().begin_parse().preload_uint(32);
+}

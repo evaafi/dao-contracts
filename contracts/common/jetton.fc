@@ -1,0 +1,77 @@
+;; This file is licensed under the GNU General Public License.
+;; See the LICENSE.md file in the project root for more information.
+
+#include "./utils.fc";
+#include "./context.fc";
+#include "../external/jetton/export.fc";
+
+int jetton::calculate_wallet_address(slice root, slice owner) asm """
+    6 =: __wallet_code_depth
+    0xa760d629d5343e76d045017d9dc216fc8a307a8377815feb2b0a5c490e733486 =: __wallet_code_hash
+
+    NEWC
+    <b
+        b{00000010} s, // d1(8)
+        b{00000001} s, // d2(8)
+        b{00110} s,    // bits(5)
+        b{100} s,      // aug(3)
+        __wallet_code_depth 16 u,     // code depth
+        __wallet_code_depth 1 + 16 u, // data depth
+        __wallet_code_hash 256 u,     // code hash
+    b> <s
+    STSLICECONST
+    -ROT
+    NEWC
+    <b
+        b{00000001} s, // d1(8)
+        b{10000111} s, // d2(8)
+        b{0000} s,     // balance(4)
+    b> <s
+    STSLICECONST
+    STSLICE // owner
+    STSLICE // root
+    <b
+        b{100000} s,
+        __wallet_code_depth 16 u,
+        __wallet_code_hash 256 u,
+    b> <s
+    STSLICECONST
+    ONE HASHEXTAR_SHA256
+    ONE HASHEXT_SHA256
+""";
+
+(int, slice, slice) jetton::decode_notification(slice msg_body) inline_ref {
+    int amount = msg_body~load_coins();
+    slice sender = msg_body~load_msg_addr();
+    slice fwd_payload = msg_body~ut::load_either_cs();
+
+    return (amount, sender, fwd_payload);
+}
+
+() jetton::throw_128(int query_id, int token_amount, slice to_address,
+                     slice jetton_wallet_address, int exit_code) impure inline_ref {
+    int jetton_msg_value = 0;
+    int jetton_fwd_amount = 0;
+
+    builder transfer_body = begin_cell().store_int(exit_code, 32);
+
+    cell body = jetton::encode_simple_transfer_with_body_builder(
+        query_id,          ;; query_id
+        token_amount,      ;; token_amount
+        to_address,        ;; to_address
+        to_address,        ;; response_address
+        jetton_fwd_amount, ;; fwd_amount
+        transfer_body      ;; fwd_body
+    );
+
+    builder msg = ut::begin_int_msg(ut::bounce_false, jetton_wallet_address, jetton_msg_value)
+        .store_uint(1, 2) ;; 0b01
+        .store_ref(body);
+
+    send_raw_message(msg.end_cell(), MSGFLAG::ALL_NOT_RESERVED + MSGFLAG::IGNORE_ERRORS);
+}
+
+;; [r] = 4 ;; arguments to set
+;; [n] = 1 ;; arguments missing, i.e. exit_code
+cont jetton::set_args_jeh(int query_id, int token_amount, slice to_address,
+                          slice jetton_wallet_address, cont fc) asm "4 1 SETCONTARGS";

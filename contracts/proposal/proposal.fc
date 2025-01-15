@@ -1,0 +1,156 @@
+;; This file is licensed under the GNU General Public License.
+;; See the LICENSE.md file in the project root for more information.
+
+#pragma version >=0.4.4;
+
+;; (init data)
+global int      self::inited?; ;; is this contract initialized (bool)
+global int      self::proposal_id; ;; proposal id
+global slice    self::manager_address; ;; manager address
+global cell     self::holder_code; ;; code of the holder.fc smart contract
+
+;; (constructor)
+global cell     self::proposal_action; ;; proposal msg to manager
+global slice    self::jetton_wallet_address; ;; jetton wallet address
+global slice    self::ipfs;
+global int      self::send_mode;
+global cell     self::config; ;; config with times
+global int      self::for; ;; amount of coins(jetton for proposal)
+global int      self::against; ;; amount of coins(jetton against proposal)
+global int      self::start_time;
+global int      self::message_pulled;
+
+#include "../common/jetton.fc";
+#include "../external/jetton/export.fc";
+#include "../holder/encoder.fc";
+#include "./encoder.fc";
+#include "../common/utils.fc";
+#include "../common/context.fc";
+#include "./handlers.fc";
+
+() load_data() impure inline_ref {
+    (
+        self::inited?,
+        self::proposal_id,
+        self::manager_address,
+        self::holder_code,
+
+        self::proposal_action,
+        self::jetton_wallet_address,
+        self::ipfs,
+        self::send_mode,
+        self::config,
+        self::for,
+        self::against,
+        self::start_time,
+        self::message_pulled
+    ) = get_data().begin_parse().proposal::decode_storage();
+}
+
+() save_data() impure inline {
+    set_data(proposal::encode_storage(
+        self::inited?,
+        self::proposal_id,
+        self::manager_address,
+        self::holder_code,
+
+        self::proposal_action,
+        self::jetton_wallet_address,
+        self::ipfs,
+        self::send_mode,
+        self::config,
+        self::for,
+        self::against,
+        self::start_time,
+        self::message_pulled
+    ));
+}
+
+;; bounced messages handler
+int on_bounce(slice msg_body) impure inline_ref {
+    return true;
+}
+
+;; function selector by msg::op
+int selector(slice msg_body) impure inline {
+    if (msg::bounced?) { return (on_bounce(msg_body)); }
+    if (msg::op == op::proposal::constructor) { return prpsl::constructor(msg_body); }
+
+    load_data();
+    if (msg::op == op::jetton::transfer_notification) { return prpsl::process_vote(msg_body); }
+    if (msg::op == op::proposal::withdraw) { return prpsl::process_withdraw(msg_body); }
+    if (msg::op == op::proposal::finish) { return prpsl::send_result(); }
+
+    return false;
+}
+
+;; internal message entry point
+() recv_internal(int balance, int value, cell msg, slice msg_body) impure {
+    throw_if(0, msg_body.slice_empty?() | msg_body.slice_bits() < 32 + 64);
+
+    msg_body~ctx::load(msg, balance, value);
+    ut::force_addr(msg::sender);
+
+    ctx::reserve(proposal::target);
+    if (selector(msg_body)) { return (save_data()); }
+
+    throw(error::not_found); ;; not found
+}
+
+
+(_) get_storage() method_id {
+    load_data();
+
+    (
+        int new_proposal_threshold,
+        int min_proposal_execution,
+        int pending_duration,
+        int voting_duration,
+        int queue_duration,
+        int execution_duration,
+        _ ;; dict - voting_power (maybe null)
+    ) = manager::decode_config(self::config);
+
+    return (
+        self::inited?, ;; is this contract initialized (bool)
+        self::proposal_id, ;; proposal id
+        self::manager_address, ;; manager address
+        self::holder_code, ;; code of the holder.fc
+        self::proposal_action, ;; proposal msg to manager
+        self::jetton_wallet_address, ;; jetton wallet address
+        self::ipfs,
+        self::send_mode,
+        new_proposal_threshold,
+        min_proposal_execution,
+        pending_duration,
+        voting_duration,
+        queue_duration,
+        execution_duration,
+        self::for, ;; amount of coins(jetton for proposal)
+        self::against, ;; amount of coins(jetton against proposal)
+        self::start_time,
+        self::message_pulled
+    );
+}
+
+slice get_holder_address(slice owner_address) method_id {
+    load_data();
+
+    (
+        int new_proposal_threshold,
+        int min_proposal_execution,
+        int pending_duration,
+        int voting_duration,
+        int queue_duration,
+        int execution_duration,
+        _ ;; dict - voting_power (maybe null)
+    ) = manager::decode_config(self::config);
+
+    cell holder_storage = holder::encode_storage(my_address(), owner_address,
+        0, self::start_time + pending_duration + voting_duration + 1, 0);
+
+    cell holder_state_init = ut::basic_state_init(self::holder_code, holder_storage);
+    slice holder_address = ut::address_from_state(config::workchain, holder_state_init);
+
+    return holder_address;
+}

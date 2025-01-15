@@ -1,0 +1,32 @@
+;; This file is licensed under the GNU General Public License.
+;; See the LICENSE.md file in the project root for more information.
+
+int hldr::receive_coins(slice in_msg_body) impure inline_ref {
+    ctx::only_from(error::access, self::proposal_address);
+
+    (_, int jetton_amount) = (in_msg_body~load_msg_addr(), in_msg_body~load_coins());
+    self::amount += jetton_amount;
+
+    return true;
+}
+
+int hldr::withdraw_coins(slice in_msg_body) impure inline_ref {
+    ctx::only_from(error::access, self::voter_address);
+    throw_if(error::invalid_time, now() < self::end_time);
+    throw_if(error::not_enough_token, self::withdrawed == 1);
+
+    builder body = begin_cell()
+        .store_uint(op::proposal::withdraw, 32)
+        .store_uint(msg::query_id, 64)
+        .store_slice(self::voter_address)
+        .store_coins(self::amount);
+
+    builder pmsg = ut::begin_int_msg(ut::bounce_false, self::proposal_address, 0)
+        .store_uint(1, 2) ;; 0b01
+        .store_ref(body.end_cell());
+
+    send_raw_message(pmsg.end_cell(), MSGFLAG::ALL_NOT_RESERVED + MSGFLAG::IGNORE_ERRORS);
+
+    self::withdrawed = 1;
+    return true;
+}

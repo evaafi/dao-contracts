@@ -1,0 +1,24 @@
+;; This file is licensed under the GNU General Public License.
+;; See the LICENSE.md file in the project root for more information.
+
+cell holder::encode_storage(slice proposal_address, slice voter_address,
+                            int amount, int end_time, int withdrawed) impure inline_ref {
+    builder data = begin_cell()
+        .store_slice(proposal_address)
+        .store_slice(voter_address)
+        .store_coins(amount)
+        .store_uint(end_time, 32)
+        .store_uint(withdrawed, 1);
+
+    return data.end_cell();
+}
+
+(slice, slice, int, int, int) holder::decode_storage(slice s) impure inline {
+    slice proposal_address = s~load_msg_addr();
+    slice voter_address = s~load_msg_addr();
+    int amount = s~load_coins();
+    int end_time = s~load_uint(32);
+    int withdrawed = s~load_uint(1);
+
+    return (proposal_address, voter_address, amount, end_time, withdrawed);
+}

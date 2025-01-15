@@ -1,0 +1,31 @@
+const int jetton_encoder::op::transfer = 0x0f8a7ea5; ;; TEP74
+
+cell jetton::encode_simple_transfer(int query_id, int token_amount, slice to_address,
+                                    slice response_address, int fwd_amount) inline {
+    return begin_cell()
+        .store_uint(jetton_encoder::op::transfer, 32)
+        .store_uint(query_id, 64)
+        .store_coins(token_amount)
+        .store_slice(to_address)
+        .store_slice(response_address)
+        .store_int(false, 1)     ;; custom_payload
+        .store_coins(fwd_amount) ;; fwd_amount
+        .store_int(false, 1)     ;; either fwd_body
+        .end_cell();
+}
+
+cell jetton::encode_simple_transfer_with_body_builder(int query_id, int token_amount,
+                                                      slice to_address, slice response_address,
+                                                      int fwd_amount, builder fwd_body) inline {
+    return begin_cell()
+        .store_uint(jetton_encoder::op::transfer, 32)
+        .store_uint(query_id, 64)
+        .store_coins(token_amount)
+        .store_slice(to_address)
+        .store_slice(response_address)
+        .store_int(false, 1)     ;; custom_payload
+        .store_coins(fwd_amount) ;; fwd_amount
+        .store_int(false, 1)     ;; either fwd_body
+        .store_builder(fwd_body)
+        .end_cell();
+}
